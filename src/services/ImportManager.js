@@ -10,9 +10,7 @@ class ImportManager {
     }
 
     async startImport(zipPath, apiToken, baseId, tableName, uploadMethod, uiManager) {
-        console.log('ImportManager: Starting import process');
         try {
-            // Валідація файлу
             this.fileManager.validateFile(zipPath);
             uiManager.updateProgress('Файл валідовано успішно');
 
@@ -27,20 +25,14 @@ class ImportManager {
                 uiManager.updateProgress('⚠️ Не всі поля створено. Буде використано базову структуру запису.');
             }
 
-            // Підготовка даних
             uiManager.updateProgress('Підготовка даних для імпорту...');
             const preparedData = this.prepareDataForAirtable(data, zipPath);
 
-            // Експорт в Airtable
             uiManager.updateProgress('Експорт в Airtable...');
             const success = await this.airtableAPI.exportDataToTable(
-                apiToken,
-                baseId,
-                tableName,
-                preparedData,
-                zipPath
+                apiToken, baseId, tableName, preparedData, zipPath
             );
-            
+
             if (success) {
                 uiManager.importFinished(true, `Успішно імпортовано ${preparedData.length} записів`);
             } else {
@@ -53,95 +45,119 @@ class ImportManager {
     }
 
     prepareDataForAirtable(data, zipPath) {
-        return data.map(record => {
-            if (this._useBasicFields) {
-                return this.createBasicRecord(record);
-            } else {
-                return this.createFullRecord(record);
+        console.log('ImportManager: Preparing data for Airtable');
+        const preparedData = [];
+
+        for (const record of data) {
+            try {
+                const preparedRecord = this._useBasicFields 
+                    ? this.createBasicRecord(record)
+                    : this.createFullRecord(record);
+                
+                if (preparedRecord) {
+                    preparedData.push(preparedRecord);
+                }
+            } catch (error) {
+                console.error('Error preparing record:', error);
             }
-        });
+        }
+
+        console.log(`ImportManager: Prepared ${preparedData.length} records`);
+        return preparedData;
     }
 
     createBasicRecord(record) {
-        // Аналог _create_basic_record
-        return {
-            'Name': `${record['estate_type'] || 'Нерухомість'} - ${record['address'] || 'Без адреси'}`,
-            'Notes': this.createBasicDescription(record),
-            'Visited': false,
-            'Photos': this.extractPhotos(record)
-        };
+        const basicRecord = {};
+        
+        // Базові поля
+        if (record.estate_type) basicRecord.estate_type = record.estate_type;
+        if (record.price) basicRecord.price = this.convertFieldValue(record.price, 'number');
+        if (record.price_currency) basicRecord.price_currency = record.price_currency;
+        if (record.address) basicRecord.address = record.address;
+        if (record.description_detail) basicRecord.description_detail = record.description_detail;
+        
+        return basicRecord;
     }
 
     createFullRecord(record) {
-        // Аналог _create_full_record
-        const airtableRecord = { 'Visited': false };
-        for (const [xmlField, airtableField] of Object.entries(FIELD_MAPPING)) {
-            if (record[xmlField]) {
-                airtableRecord[airtableField] = this.convertFieldValue(xmlField, record[xmlField]);
-            }
-        }
-        airtableRecord['Photos'] = this.extractPhotos(record);
-        return airtableRecord;
-    }
-
-    convertFieldValue(fieldName, value) {
-        // Аналог _convert_field_value
-        try {
-            if (NUMBER_FIELDS.has(fieldName)) {
-                return parseFloat(value);
-            } else if (INTEGER_FIELDS.has(fieldName)) {
-                return parseInt(value, 10);
-            } else {
-                return String(value);
-            }
-        } catch {
-            return String(value);
-        }
-    }
-
-    extractPhotos(record) {
-        // Аналог _extract_photos
-        const photos = [];
-        if (Array.isArray(record.photos)) {
-            for (const photo of record.photos) {
-                if (photo && photo.filename) {
-                    photos.push(photo.filename);
+        const fullRecord = {};
+        
+        // Копіюємо всі поля з мапінгу
+        for (const [ourField, airtableField] of Object.entries(FIELD_MAPPING)) {
+            if (record[ourField] !== undefined) {
+                const value = this.convertFieldValue(record[ourField], ourField);
+                if (value !== null && value !== undefined) {
+                    fullRecord[airtableField] = value;
                 }
             }
         }
-        return photos;
+        
+        // Обробляємо фото
+        if (record.photos && Array.isArray(record.photos)) {
+            const photoUrls = this.extractPhotos(record.photos, zipPath);
+            if (photoUrls.length > 0) {
+                fullRecord.photos = photoUrls;
+            }
+        }
+        
+        // Додаємо базовий опис, якщо немає детального
+        if (!fullRecord.description_detail && record.description_detail) {
+            fullRecord.description_detail = this.createBasicDescription(record);
+        }
+        
+        return fullRecord;
+    }
+
+    convertFieldValue(value, fieldName) {
+        if (value === null || value === undefined || value === '') {
+            return null;
+        }
+
+        // Конвертуємо числа
+        if (NUMBER_FIELDS.has(fieldName)) {
+            const num = parseFloat(value);
+            return isNaN(num) ? null : num;
+        }
+
+        // Конвертуємо цілі числа
+        if (INTEGER_FIELDS.has(fieldName)) {
+            const num = parseInt(value);
+            return isNaN(num) ? null : num;
+        }
+
+        // Конвертуємо булеві значення
+        if (typeof value === 'string') {
+            if (value.toLowerCase() === 'true' || value === '1') return true;
+            if (value.toLowerCase() === 'false' || value === '0') return false;
+        }
+
+        return value;
+    }
+
+    extractPhotos(photos, zipPath) {
+        const photoUrls = [];
+        
+        for (const photo of photos) {
+            const filename = photo.filename || photo;
+            if (filename) {
+                // Тут можна додати логіку для завантаження фото
+                photoUrls.push(filename);
+            }
+        }
+        
+        return photoUrls;
     }
 
     createBasicDescription(record) {
-        // Аналог _create_basic_description
         const parts = [];
-        const fieldsToAdd = [
-            ['estate_type', 'Тип'],
-            ['price', 'Ціна'],
-            ['address', 'Адреса'],
-            ['room_quantity', 'Кімнати'],
-            ['total_floor_area', 'Площа'],
-            ['owner_name', 'Власник'],
-            ['owner_phone', 'Телефон'],
-            ['agent_name', 'Агент'],
-            ['description_detail', 'Опис']
-        ];
-        for (const [field, label] of fieldsToAdd) {
-            const value = record[field];
-            if (value) {
-                if (field === 'price') {
-                    const currency = record['price_currency'] || '';
-                    parts.push(`${label}: ${value} ${currency}`);
-                } else if (field === 'total_floor_area') {
-                    parts.push(`${label}: ${value} м²`);
-                } else if (field === 'floor' && record['number_of_storeys']) {
-                    parts.push(`Поверх: ${value}/${record['number_of_storeys']}`);
-                } else {
-                    parts.push(`${label}: ${value}`);
-                }
-            }
-        }
-        return parts.join('\n');
+        
+        if (record.estate_type) parts.push(`Тип: ${record.estate_type}`);
+        if (record.price) parts.push(`Ціна: ${record.price} ${record.price_currency || 'USD'}`);
+        if (record.address) parts.push(`Адреса: ${record.address}`);
+        if (record.room_quantity) parts.push(`Кімнат: ${record.room_quantity}`);
+        if (record.total_floor_area) parts.push(`Площа: ${record.total_floor_area} м²`);
+        
+        return parts.join(', ');
     }
 }
 
